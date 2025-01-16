@@ -1,10 +1,10 @@
 # EvaByte: Efficient Byte-level Language Models at Scale
 
 <p align="center">
-   <a href="https://huggingface.co/collections/linzheng/evabyte-6781cfc1793bdaf579fc4461" target="_blank"  style="margin-right: 10px;">
+   <a href="https://huggingface.co/collections/linzheng/evabyte-6781cfc1793bdaf579fc4461" target="_blank">
       <img alt="Huggingface" src="https://img.shields.io/badge/🤗-HF_Models-blue" />
    </a>
-   <a href="https://hkunlp.github.io/blog/2025/evabyte" target="_blank" style="margin-right: 10px;">
+   <a href="https://hkunlp.github.io/blog/2025/evabyte" target="_blank">
       <img alt="Blog" src="https://img.shields.io/badge/📰-Blog-red" />
    </a>
       <img alt="Paper" src="https://img.shields.io/badge/📜-Paper_(Coming_Soon)-gray" />
