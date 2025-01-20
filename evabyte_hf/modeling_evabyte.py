@@ -16,7 +16,6 @@ from transformers.modeling_utils import PreTrainedModel
 from .configuration_evabyte import EvaByteConfig
 from .multibyte_decoding_evabyte import MultiByteDecodingMixin
 try:
-    raise ImportError
     import triton
     USE_TRITON_IMPL = True
     from .eva import EvaAttention
