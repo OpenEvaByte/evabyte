@@ -146,7 +146,7 @@ Evaluation scripts will be released soon.
 @misc{evabyte,
     title = {EvaByte: Efficient Byte-level Language Models at Scale},
     url = {https://hkunlp.github.io/blog/2025/evabyte},
-    author = {Lin Zheng and Xueliang Zhao and Guangtao Wang and Chen Wu and David Dong and Angela Wang and Mingran Wang and Yun Du and Haige Bo and Tony Zhang and Changran Hu and Urmish Thakker and Lingpeng Kong},
+    author = {Lin Zheng and Xueliang Zhao and Guangtao Wang and Chen Wu and David Dong and Angela Wang and Mingran Wang and Yun Du and Haige Bo and Amol Sharma and Bo Li and Kejie Zhang and Changran Hu and Urmish Thakker and Lingpeng Kong},
     year = {2025}
 }
 ```
