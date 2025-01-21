@@ -132,7 +132,7 @@ EvaByte supports two generation interfaces:
 
 ## 📊 Evaluation
 
-For detailed evaluation results, check out our [blog post](https://hkunlp.github.io/blog/2025/evabyte).
+For detailed evaluation results, check out our blog post at [SambaNova](https://sambanova.ai/blog/evabyte-efficient-byte-level-language-models-at-scale) or [HKUNLP](https://hkunlp.github.io/blog/2025/evabyte).
 
 - For HumanEval(-Plus), MBPP(-Plus), MATH, and GSM8k tasks, we use a fork of [BigCode Evaluation Harness](https://github.com/bigcode-project/bigcode-evaluation-harness) to evaluate EvaByte.
 - For remaining tasks, we use the [OLMES](https://github.com/allenai/olmes/tree/main) evaluation framework.
