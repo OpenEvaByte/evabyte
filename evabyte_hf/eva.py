@@ -2,8 +2,8 @@ from typing import Dict, Optional, Tuple, List, Any, Union
 import torch
 from torch import nn
 import torch.nn.functional as F
-from .eva_agg_kernel import triton_eva_agg_fwd
-from .eva_prep_kv_kernel import triton_eva_prep_kv_fwd
+from .eva_agg_kernel import eva_agg_func_triton
+from .eva_prep_kv_kernel import eva_prep_kv_func_triton
 try:
     import triton
     USE_TRITON_IMPL = True
@@ -129,10 +129,10 @@ class EvaAttention(nn.Module):
         assert not output_attentions
         bsz, q_len, _ = hidden_states.size()
 
-        if use_cache and past_key_value is None:
-            raise ValueError
-
-        assert isinstance(attention_mask, tuple)
+        if use_cache:
+            if past_key_value is None:
+                raise ValueError
+            assert isinstance(attention_mask, tuple)
 
         # infer the model's running mode
         is_prefilling = use_cache and past_key_value.get_seq_length(self.layer_idx) == 0
@@ -141,13 +141,16 @@ class EvaAttention(nn.Module):
         if is_prefilling:
             assert len(attention_mask) == 2
             window_mask, intra_chunk_mask = attention_mask
-            chunk_dummpy_mask = None
+            chunk_mask = None
         elif is_decoding:
             assert len(attention_mask) == 3
-            window_mask, intra_chunk_mask, chunk_dummpy_mask = attention_mask
+            window_mask, intra_chunk_mask, chunk_mask = attention_mask
         else:
-            window_mask, intra_chunk_mask = attention_mask
-            chunk_dummpy_mask = None
+            if attention_mask is not None:
+                assert isinstance(attention_mask, tuple) and len(attention_mask) == 3
+                window_mask, chunk_mask, intra_chunk_mask = attention_mask
+            else:
+                window_mask, chunk_mask, intra_chunk_mask = None, None, None
 
         ############################################
         # compute q, k, v from hidden states
@@ -201,7 +204,7 @@ class EvaAttention(nn.Module):
             #   k/v: [b, h, w, d]
             #   rfa_k/rfa_v: [b, h, w//c, d]
             # 3. in forward inference; the seq_len is already divisible
-            rfa_k, rfa_v = triton_eva_prep_kv_fwd(
+            rfa_k, rfa_v = eva_prep_kv_func_triton(
                 dump_k, dump_v, 
                 self.adaptive_mu_k, self.adaptive_phi, 
                 dump_rf_mask, self.head_dim_scaling, self.chunk_size
@@ -227,10 +230,11 @@ class EvaAttention(nn.Module):
             #   q: [b, h, n, d]
             #   k/v: [b, h, n, d]
             #   rfa_k/rfa_v: [b, h, n // c, d]
-            attn_output = triton_eva_agg_fwd(
+            attn_output = eva_agg_func_triton(
                 q, s_k, s_v, 
                 rfa_k, rfa_v, 
-                singleton_mask, self.head_dim_scaling, self.window_size, self.chunks_per_window
+                singleton_mask, chunk_mask,
+                self.head_dim_scaling, self.window_size, self.chunks_per_window
             )
         elif is_decoding:
             # 2. in decoding, the input shape is 
@@ -258,8 +262,8 @@ class EvaAttention(nn.Module):
                     agg_k = torch.cat([s_k, rfa_k[..., :num_windows_seen_so_far * self.chunks_per_window, :]], dim=-2)
                     agg_v = torch.cat([s_v, rfa_v[..., :num_windows_seen_so_far * self.chunks_per_window, :]], dim=-2)
                     if singleton_mask is not None:
-                        assert chunk_dummpy_mask is not None
-                        attn_mask = torch.cat([singleton_mask, chunk_dummpy_mask], dim=-1)
+                        assert chunk_mask is not None
+                        attn_mask = torch.cat([singleton_mask, chunk_mask], dim=-1)
                     else:
                         attn_mask = singleton_mask
             else:
@@ -275,10 +279,11 @@ class EvaAttention(nn.Module):
             )
         else:
             # 3. in single-forward inference
-            attn_output = triton_eva_agg_fwd(
+            attn_output = eva_agg_func_triton(
                 q, s_k, s_v, 
                 rfa_k, rfa_v, 
-                singleton_mask, self.head_dim_scaling, self.window_size, self.chunks_per_window
+                singleton_mask, chunk_mask,
+                self.head_dim_scaling, self.window_size, self.chunks_per_window
             )
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(

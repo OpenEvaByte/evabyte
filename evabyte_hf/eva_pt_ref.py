@@ -290,7 +290,7 @@ class EvaAttention(nn.Module):
                 chunk_size=self.chunk_size,
             )
         else:
-            prev_s_mask = window_causal_mask # [1, 1, w, i, j]
+            prev_s_mask = self.window_partition(prev_causal_mask) # [1, 1, w, i, j]
             cur_s_mask = None
             prev_chunk_mask = self.window_partition(chunk_causal_mask)
             cur_chunk_mask = None

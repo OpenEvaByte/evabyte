@@ -148,7 +148,7 @@ class EvaByteRMSNorm(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.fp32_ln = config.fp32_ln
+        self.fp32_ln = True
         self.variance_epsilon = config.rms_norm_eps
         self.add_unit_offset = config.norm_add_unit_offset
         if self.add_unit_offset:
@@ -157,18 +157,14 @@ class EvaByteRMSNorm(nn.Module):
             self.weight = nn.Parameter(torch.ones(config.hidden_size))
 
     def forward(self, hidden_states):
-        if hasattr(self, 'config'):
-            fp32_ln = self.config.fp32_ln
-        else:
-            fp32_ln = self.fp32_ln
-        hidden_states = hidden_states.to(torch.float32 if fp32_ln else torch.bfloat16)
+        _hidden_states = hidden_states.to(torch.float32 if self.fp32_ln else torch.bfloat16)
 
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        variance = _hidden_states.pow(2).mean(-1, keepdim=True)
+        _hidden_states = _hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         if self.add_unit_offset:
-            return (1 + self.weight) * hidden_states
+            return ((1 + self.weight) * _hidden_states).type_as(hidden_states)
         else:
-            return self.weight * hidden_states
+            return (self.weight * _hidden_states).type_as(hidden_states)
 
 class EvaByteRotaryEmbedding(torch.nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
@@ -313,7 +309,7 @@ class EvaByteDecoderLayer(nn.Module):
                                                                             cos=cos,
                                                                             sin=sin,
                                                                             multibyte_decoding=multibyte_decoding)
-        hidden_states = residual + hidden_states
+        hidden_states = (residual + hidden_states).to(hidden_states.dtype)
 
         # Fully Connected
         residual = hidden_states
@@ -321,7 +317,7 @@ class EvaByteDecoderLayer(nn.Module):
             residual = residual.float()
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states = (residual + hidden_states).to(hidden_states.dtype)
 
         outputs = (hidden_states, )
 
@@ -653,7 +649,7 @@ class EvaByteModel(EvaBytePreTrainedModel):
                     )
             else:
                 assert self.training
-                assert seq_len % self.config.window_size == 0
+                assert seq_len % self.config.window_size == 0, "Training is only tested for sequences that are a multiple of window_size"
                 # for training, we need to pass in the attention mask
                 # usually calculated by _prepare_training_attn_mask()
                 causal_mask = attention_mask
@@ -683,31 +679,6 @@ class EvaByteModel(EvaBytePreTrainedModel):
         cos = cos.unsqueeze(1)
         sin = sin.unsqueeze(1)
 
-        if USE_TRITON_IMPL and (not multibyte_decoding):
-            # the masks generated above for triton kernels are boolean. Convert them to floats
-            if (
-                (not use_cache) or
-                (use_cache and past_seen_tokens == 0)
-            ):
-                window_mask, intra_chunk_mask = causal_mask
-                
-                if window_mask is not None:
-                    assert window_mask.dtype == torch.bool
-                    window_mask_float = window_mask.to(torch.float)
-                    window_mask_float = window_mask_float.masked_fill(window_mask.to(torch.bool), MASK_MIN_VALUE)
-                    window_mask_float = window_mask_float.reshape(batch_size, 1, -1, self.config.window_size)
-                    window_mask = window_mask_float.to(hidden_states.dtype)
-
-                if intra_chunk_mask is not None:
-                    assert intra_chunk_mask.dtype == torch.bool
-                    intra_chunk_mask_float = intra_chunk_mask.to(torch.float)
-                    intra_chunk_mask_float = intra_chunk_mask_float.masked_fill(intra_chunk_mask.to(torch.bool), MASK_MIN_VALUE)
-                    intra_chunk_mask = intra_chunk_mask_float.to(hidden_states.dtype)
-                causal_mask = (window_mask, intra_chunk_mask)
-
-        if self.config.fp32_skip_add:
-            hidden_states = hidden_states.float()
-
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -718,20 +689,17 @@ class EvaByteModel(EvaBytePreTrainedModel):
                 all_hidden_states += (hidden_states, )
 
             if self.gradient_checkpointing and self.training:
-
-                def create_custom_forward(module):
-                    def custom_forward(*inputs):
-                        # None for past_key_value
-                        return module(*inputs, output_attentions, use_cache=None)
-
-                    return custom_forward
-
                 layer_outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(decoder_layer),
+                    decoder_layer.__call__,
                     hidden_states,
                     causal_mask,
                     position_ids,
-                    None,
+                    past_key_values,
+                    output_attentions,
+                    use_cache,
+                    cos,
+                    sin,
+                    multibyte_decoding,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -805,154 +773,6 @@ class EvaByteForCausalLM(EvaBytePreTrainedModel, MultiByteDecodingMixin):
 
     def get_decoder(self):
         return self.model
-
-    def _prepare_training_attn_mask(
-        self, 
-        target_token_type_ids,
-        use_doc_boundary_attention, 
-        EOS_TOKEN_TYPE_ID=None,
-        PAD_TOKEN_TYPE_ID=None,
-    ):
-        '''
-        This function prepares the attention mask for training byte models.
-            target_token_type_ids:
-                Tensor of shape (batch_size, seq_len), marking the token type ids 
-                for the target sequence. In particular, we should have
-                    - target_token_type_ids[i, j] = EOS_TOKEN_TYPE_ID 
-                        if the j-th token in the i-th sequence is the end of an article.
-                    - target_token_type_ids[i, j] = PAD_TOKEN_TYPE_ID 
-                        if the j-th token in the i-th sequence is the padding token.
-            use_doc_boundary_attention: bool, 
-                whether to enable doc boundary attention.
-            EOS_TOKEN_TYPE_ID: int, 
-                the token type id for the end of an article.
-            PAD_TOKEN_TYPE_ID: int, 
-                the token type id for the padding token.
-        '''
-        assert self.training
-        batch_size, num_tokens = target_token_type_ids.shape
-
-        chunk_causal_mask, window_causal_mask = prepare_eva_attention_mask(
-            num_tokens, 
-            target_token_type_ids.device, 
-            chunk_size=self.config.chunk_size, 
-            window_size=self.config.window_size,
-            use_cache=False,
-            cache=None
-        )
-        if use_doc_boundary_attention:
-            #### step 1: mark each document with a unique id
-            end_token_ids = {EOS_TOKEN_TYPE_ID, PAD_TOKEN_TYPE_ID}
-            token_types = torch.zeros(batch_size, num_tokens)
-            for sequence_idx, sequence in enumerate(target_token_type_ids):
-                num_articles = 0
-                start_index = 0
-                # for each sample in the batch, the collapsed attention mask looks like:
-                # [1, 1, .... 1, 0, 2, 2, ... 2, 0, ... n, n ..... n], assuming there are n articles in the sequence.
-                # Each of the n articles are separated by 0.
-                for token_idx, token_type_id in enumerate(sequence):
-                    if start_index is not None and token_type_id.item() in end_token_ids:
-                        num_articles += 1
-                        end_index = token_idx if token_type_id == PAD_TOKEN_TYPE_ID else token_idx + 1
-                        token_types[sequence_idx][start_index:end_index] = num_articles
-                        start_index = None
-                    elif start_index is None and token_type_id not in end_token_ids:
-                        start_index = token_idx + 1
-
-            assert num_tokens % self.config.chunk_size == 0, "Number of tokens must be divisible by chunk size"
-            assert num_tokens % self.config.window_size == 0, "Number of tokens must be divisible by window size"
-            num_chunks = num_tokens // self.config.chunk_size
-            num_windows = num_tokens // self.config.window_size
-
-            article_separator = 0
-
-            #### step 2: generate attention masks for each window
-            #### NOTE: we perform exact attention within each window, 
-            ####       so we only need to mask out different documents
-            ####       for each window.
-            token_types_windows = token_types.reshape(batch_size, num_windows, self.config.window_size, 1)
-            token_types_windows_t = token_types_windows.transpose(-1, -2)
-            # replace all elements in TOKEN_SEPS with -1
-            token_types_windows = torch.where(token_types_windows == article_separator, -1, token_types_windows)
-            window_3d_mask = (token_types_windows == token_types_windows_t)
-            window_3d_mask = ~window_3d_mask
-
-            #### step 3: generate chunk-level 3D masks
-            #### NOTE: this is a bit tricky, as we aim to mask out different 
-            ####       documents to avoid cross-doc attention across chunks.
-            #### Example: suppose we have a sequence of length 12 with 3 documents:
-            ####       [1, 1, 1, 1, 1, 2, 2, 3, 3, 3, 3, 3].
-            ####       The chunk-size and window-size are both 4.
-            ####       The chunk-level mask of shape (batch_size, seq_len, num_chunks) is:
-            ####       [
-            ####         [0, 0, 0],
-            ####         [0, 0, 0],
-            ####         [0, 0, 0],
-            ####         [0, 0, 0],
-            ####
-            ####         [1, 0, 0],
-            ####         [0, 0, 0],
-            ####         [0, 0, 0],
-            ####         [0, 0, 0],
-            ####
-            ####         [0, 1, 0],
-            ####         [0, 1, 0],
-            ####         [0, 1, 0],
-            ####         [0, 1, 0],
-            ####       ]
-            ####       Explanation:
-            ####       - Tokens will not attend to their own and future chunks.
-            ####         (as tokens within a chunk are captured by the window-level exact attention)
-            ####       - Tokens will attend to a chunk only if there are tokens 
-            ####         from the same document in that chunk.
-            ####       The mask within each chunk of shape (batch_size, num_chunks, chunk_size) is:
-            ####       [
-            ####         [1, 1, 1, 1],
-            ####         [0, 0, 0, 1],
-            ####         [1, 1, 1, 1],
-            ####       ]
-            ####       Explanation:
-            ####       - If all tokens in a chunk are from the same document, 
-            ####         no tokens will be masked out.
-            ####       - If there are tokens from different documents in a chunk, 
-            ####         only tokens from the rightmost document will be kept.
-            ####         (b/c the future chunks might contain tokens from the rightmost document,
-            ####         but all the remaining docs will never get attended by other docs)
-            token_types_chunks = token_types.reshape(batch_size, num_chunks, self.config.chunk_size)
-            inter_chunk_mask = torch.zeros((batch_size, num_tokens, num_chunks), dtype=torch.bool)
-            intra_chunk_mask = torch.ones_like(token_types_chunks, dtype=torch.bool)
-            
-            for chunk_idx in range(num_chunks):
-                for batch_idx in range(batch_size):
-                    # Identify tokens in the current chunk belonging to each sequence
-                    chunk = token_types_chunks[batch_idx, chunk_idx]
-                    unique_elements = torch.unique(chunk, sorted=True).tolist()
-                    
-                    # Create a mask for whether each token can attend to the current chunk
-                    for token_type in unique_elements:
-                        if token_type == article_separator:
-                            continue
-                        token_mask = (token_types[batch_idx] == token_type)
-                        inter_chunk_mask[batch_idx, :, chunk_idx] |= token_mask
-
-                    # Create a mask within each chunk
-                    unique_elements = [x for x in unique_elements if x != article_separator]
-                    if len(unique_elements) > 1 and chunk[-1] != article_separator:
-                        intra_chunk_mask[batch_idx, chunk_idx] = (chunk == unique_elements[-1])
-            
-            inter_chunk_mask = ~inter_chunk_mask
-            intra_chunk_mask = ~intra_chunk_mask
-
-            window_mask = torch.logical_or(window_causal_mask, window_3d_mask.unsqueeze(1))
-            inter_chunk_mask = torch.logical_or(chunk_causal_mask, inter_chunk_mask.unsqueeze(1))
-            intra_chunk_mask = intra_chunk_mask.unsqueeze(1).unsqueeze(-1)
-
-            joint_mask = torch.cat([window_mask, inter_chunk_mask.reshape(*window_mask.shape)], dim=-1)
-            attention_mask = (joint_mask, intra_chunk_mask)
-        else:
-            joint_mask = torch.cat([window_causal_mask, chunk_causal_mask.reshape(*window_causal_mask.shape)], dim=-1)
-            attention_mask = (joint_mask, None)
-        return attention_mask
 
     def forward(
             self,

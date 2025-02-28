@@ -12,9 +12,20 @@
 
 This repository provides the model implementation and inference examples for EvaByte.
 
+## News
+
+- [2025-02-28]: new `triton` kernels are released for training.
+- [2025-01-20]: EvaByte checkpoints and inference code are released.
+
 ## 🛠️ Model Implementation
 
 Our implementation of EvaByte is based on the [Huggingface `transformers`](https://github.com/huggingface/transformers) library, located in the `evabyte_hf` folder. Its attention mechanism, EVA, is adapted from this [repository](https://github.com/HKUNLP/efficient-attention) and implemented with a `triton` kernel -- performant but with room for further optimization. We also provide a native PyTorch implementation in `evabyte_hf/eva_pt_ref.py` for reference.
+
+## Training
+
+We provide a few triton kernels for EVA to accelerate training on GPUs. These kernels have been numerically validated against the native PyTorch implementation, and we've tested that training works at a limited scale. EVA (`evabyte_hf/eva.py`) might be also used as a standalone, more efficient alternative to standard self-attention modules in Transformers. However, due to resource constraints, we have not yet conducted large-scale training experiments nor developed an optimized codebase for GPUs; we are actively working on this and will provide updates when a minimal training pipeline is available for release.
+
+**Note:** The input sequence length for training may be a multiple of 2048, which corresponds to the `window_size` in our current EvaByte implementation.
 
 ## 🚀 Inference with `transformers`
 
