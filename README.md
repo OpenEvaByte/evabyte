@@ -14,6 +14,7 @@ This repository provides the model implementation and inference examples for Eva
 
 ## News
 
+- [2025-03-19]: eval scripts are released.
 - [2025-02-28]: new `triton` kernels are released for training.
 - [2025-01-20]: EvaByte checkpoints and inference code are released.
 
@@ -148,7 +149,7 @@ For detailed evaluation results, check out our blog post at [SambaNova](https://
 - For HumanEval(-Plus), MBPP(-Plus), MATH, and GSM8k tasks, we use a fork of [BigCode Evaluation Harness](https://github.com/bigcode-project/bigcode-evaluation-harness) to evaluate EvaByte.
 - For remaining tasks, we use the [OLMES](https://github.com/allenai/olmes/tree/main) evaluation framework.
 
-Evaluation scripts will be released soon.
+Evaluation scripts are in the `evals` directory. Please refer to the [evals/README.md](evals/README.md) for more details.
 
 ## 📚 Citation
 ```bibtex
